@@ -1,7 +1,7 @@
 from typing import Any, List, Literal, Union
 
 import polars as pl
-import polars.selectors as cs
+from polars.selectors import is_selector
 
 from utils import validate_columns
 
@@ -39,9 +39,14 @@ class Indicators:
         return self._lf.show_graph(optimized=optimized)
 
     def _get_column_names(self, columns: pl.Expr):
-        return self._lf.select(columns).collect_schema().names()
+        if is_selector(columns):
+            return self._lf.select(columns).collect_schema().names()
+        else:
+            return columns
 
-    def sma(self, columns: Union[List[str], pl.Expr], window_size: int) -> "Indicators":
+    def sma(
+        self, columns: Union[List[str], pl.Expr], window_size: int, _suffix: str = ""
+    ) -> "Indicators":
         """
         Calculate Simple Moving Average for the given window_size
         """
@@ -57,14 +62,14 @@ class Indicators:
             pl.col(col)
             .rolling_mean(window_size=window_size)
             .over("symbol")
-            .alias(col + f"_sma_{window_size}")
+            .alias(_suffix + f"{col}_sma_{window_size}")
             for col in columns
         )
 
         return self
 
     def awesome_oscillator(
-        self, short_window: int = 5, long_window: int = 34
+        self, short_window: int = 5, long_window: int = 34, _suffix: str = ""
     ) -> "Indicators":
         """
         Calculate awesome oscillator
@@ -85,7 +90,7 @@ class Indicators:
             (
                 pl.col(f"_midpoint_sma_{short_window}")
                 - pl.col(f"_midpoint_sma_{long_window}")
-            ).alias(f"ao_{short_window}_{long_window}")
+            ).alias(_suffix + f"ao_{short_window}_{long_window}")
         )
 
         self._lf = self._lf.select(
@@ -130,7 +135,7 @@ class Indicators:
 
         return self
 
-    def ema(self, columns: Union[List[str], pl.Expr], span: int):
+    def ema(self, columns: Union[List[str], pl.Expr], span: int, _suffix: str = ""):
         """
         Calculate Exponential Moving Average
         """
@@ -139,13 +144,17 @@ class Indicators:
         alpha = 2 / (span + 1)
 
         self._lf = self._lf.with_columns(
-            pl.col(col).ewm_mean(alpha=alpha, adjust=False).alias(f"{col}_ema_{span}")
+            pl.col(col)
+            .ewm_mean(alpha=alpha, adjust=False)
+            .alias(_suffix + f"{col}_ema_{span}")
             for col in columns
         )
 
         return self
 
-    def rsi(self, columns: Union[List[str], pl.Expr], period: int = 14):
+    def rsi(
+        self, columns: Union[List[str], pl.Expr], period: int = 14, _suffix: str = ""
+    ):
         """
         Calculate Relative Strenght Index
         """
@@ -191,7 +200,7 @@ class Indicators:
                         100
                         / (1 + pl.col(f"_{col}_avg_gain") / pl.col(f"_{col}_avg_loss"))
                     )
-                ).alias(f"{col}_rsi_{period}")
+                ).alias(_suffix + f"{col}_rsi_{period}")
                 for col in columns
             )
             .select(
@@ -203,6 +212,150 @@ class Indicators:
                     ]
                 )
             )
+        )
+
+        return self
+
+    def bollinger_bands(
+        self,
+        columns: Union[List[str], pl.Expr],
+        window_size: int = 20,
+        num_std_dev: float = 2,
+        _suffix: str = "",
+    ):
+        """
+        Calculate Bollinger Bands
+        """
+
+        columns = self._get_column_names(columns)
+
+        self._lf = self.sma(columns=columns, window_size=window_size, _suffix="_")._lf
+        self._lf = (
+            self._lf.with_columns(
+                pl.col(col)
+                .rolling_std(window_size=window_size)
+                .over("symbol")
+                .alias(f"_{col}_std_{window_size}")
+                for col in columns
+            )
+            .with_columns(
+                (
+                    pl.col(f"_{col}_sma_{window_size}")
+                    + num_std_dev * pl.col(f"_{col}_std_{window_size}")
+                ).alias(_suffix + f"{col}_upper_band_{window_size}_{num_std_dev}")
+                for col in columns
+            )
+            .with_columns(
+                (
+                    pl.col(f"_{col}_sma_{window_size}")
+                    - num_std_dev * pl.col(f"_{col}_std_{window_size}")
+                ).alias(_suffix + f"{col}_lower_band_{window_size}_{num_std_dev}")
+                for col in columns
+            )
+            .select(
+                pl.exclude(
+                    [
+                        f"_{col}_{suffix}_{window_size}"
+                        for col in columns
+                        for suffix in ["std", "sma"]
+                    ]
+                )
+            )
+        )
+
+        return self
+
+    def macd(
+        self,
+        columns: Union[List[str], pl.Expr],
+        short_span: int = 12,
+        long_span: int = 26,
+        signal_span: int = 9,
+        _suffix="",
+    ):
+        """
+        Calculates Moving Average Convergence Divergence
+        """
+
+        columns = self._get_column_names(columns)
+
+        self._lf = self.ema(columns=columns, span=short_span, _suffix="_")._lf
+        self._lf = self.ema(columns=columns, span=long_span, _suffix="_")._lf
+
+        self._lf = self._lf.with_columns(
+            (
+                pl.col(f"_{col}_ema_{short_span}") - pl.col(f"_{col}_ema_{long_span}")
+            ).alias(f"_{col}_macd")
+            for col in columns
+        )
+
+        self._lf = self.ema(
+            columns=[f"_{col}_macd" for col in columns], span=signal_span, _suffix="_"
+        )._lf
+
+        self._lf = self._lf.rename(
+            {f"__{col}_macd_ema_{signal_span}": f"{col}_signal_line" for col in columns}
+        ).select(
+            pl.exclude(
+                [
+                    f"_{col}_ema_{span}"
+                    for col in columns
+                    for span in [short_span, long_span]
+                ]
+                + [f"_{col}_macd" for col in columns]
+                + [f"__{col}_macd_ema_{signal_span}" for col in columns]
+            )
+        )
+
+        return self
+
+    def atr(self, period: int = 14, _suffix=""):
+        """
+        Calculate Average True Range
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                (pl.col("high") - pl.col("low")).alias("_hl_range"),
+                (pl.col("high") - pl.col("close").shift(1)).abs().alias("_hc_range"),
+                (pl.col("low") - pl.col("close").shift(1)).abs().alias("_lc_range"),
+            )
+            .with_columns(
+                pl.max_horizontal(["_hl_range", "_hc_range", "_lc_range"]).alias(
+                    "_true_range"
+                )
+            )
+            .with_columns(
+                pl.col("_true_range")
+                .rolling_mean(window_size=period)
+                .alias(_suffix + "atr")
+            )
+            .select(pl.exclude(["_hl_range", "_hc_range", "_lc_range", "_true_range"]))
+        )
+
+        return self
+
+    def stochastic_oscillator(self, period: int = 14, _suffix: str = ""):
+        """
+        Calculate Stochastic Oscillator
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                (pl.col("close") - pl.col("low"))
+                .rolling_min(window_size=period)
+                .alias("_numerator"),
+                (
+                    pl.col("high").rolling_max(window_size=period)
+                    - pl.col("low").rolling_min(window_size=period)
+                ).alias("_denominator"),
+            )
+            .with_columns(
+                ((pl.col("_numerator") / pl.col("_denominator") * 100)).alias(
+                    _suffix + f"stochastic_oscillator_{period}"
+                )
+            )
+            .select(pl.exclude(["_numerator", "_denominator"]))
         )
 
         return self
