@@ -173,12 +173,14 @@ class Indicators:
             .with_columns(
                 pl.col(f"_{col}_gain")
                 .rolling_mean(window_size=period)
+                .over("symbol")
                 .alias(f"_{col}_avg_gain")
                 for col in columns
             )
             .with_columns(
                 pl.col(f"_{col}_loss")
                 .rolling_mean(window_size=period)
+                .over("symbol")
                 .alias(f"_{col}_avg_loss")
                 for col in columns
             )
