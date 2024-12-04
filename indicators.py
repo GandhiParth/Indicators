@@ -1,6 +1,7 @@
-from typing import Any, List, Literal
+from typing import Any, List, Literal, Union
 
 import polars as pl
+import polars.selectors as cs
 
 from utils import validate_columns
 
@@ -14,12 +15,21 @@ class Indicators:
         """
         Initialize the class
         """
-        self._lf = df.lazy().sort("timestamp")
+
+        self._lf = df.lazy()
+        self._symbol_flag = False
+
+        if "symbol" not in self._lf.collect_schema().names():
+            self._symbol_flag = True
+            self._lf = self._lf.with_columns(pl.lit("x").alias("symbol"))
+        self._lf = self._lf.sort("timestamp")
 
     def collect(self) -> pl.DataFrame:
         """
         Collect the results of the DataFrame
         """
+        if self._symbol_flag:
+            self._lf = self._lf.select(pl.exclude("symbol"))
         return self._lf.collect()
 
     def show_graph(self, optimized: bool = True):
@@ -28,10 +38,16 @@ class Indicators:
         """
         return self._lf.show_graph(optimized=optimized)
 
-    def sma(self, columns: List[str], window_size: int) -> "Indicators":
+    def _get_column_names(self, columns: pl.Expr):
+        return self._lf.select(columns).collect_schema().names()
+
+    def sma(self, columns: Union[List[str], pl.Expr], window_size: int) -> "Indicators":
         """
         Calculate Simple Moving Average for the given window_size
         """
+
+        columns = self._get_column_names(columns)
+
         validate_columns(
             required_columns=columns,
             available_columns=self._lf.collect_schema().names(),
@@ -40,6 +56,7 @@ class Indicators:
         self._lf = self._lf.with_columns(
             pl.col(col)
             .rolling_mean(window_size=window_size)
+            .over("symbol")
             .alias(col + f"_sma_{window_size}")
             for col in columns
         )
@@ -52,6 +69,7 @@ class Indicators:
         """
         Calculate awesome oscillator
         """
+
         validate_columns(
             required_columns=["high", "low"],
             available_columns=self._lf.collect_schema().names(),
@@ -82,7 +100,7 @@ class Indicators:
 
     def fill_null(
         self,
-        columns: List[str],
+        columns: Union[List[str], pl.Expr],
         value: Any = None,
         method: Literal[
             None, "forward", "backward", "min", "max", "mean", "zero", "one"
@@ -93,6 +111,8 @@ class Indicators:
 
         if value is None and method is None:
             raise ValueError("Either Value or Method needs to be given")
+
+        columns = self._get_column_names(columns)
 
         validate_columns(
             required_columns=columns,
@@ -105,20 +125,82 @@ class Indicators:
             )
         else:
             self._lf = self._lf.with_columns(
-                pl.col(col).fill_null(strategy=method) for col in columns
+                pl.col(col).fill_null(strategy=method).over("symbol") for col in columns
             )
 
         return self
 
-    def kama(self, columns: List[str], n, fastest, slowest):
+    def ema(self, columns: Union[List[str], pl.Expr], span: int):
         """
-        Calculate Kaufman's Adaptive Moving Average (KAMA).
-
-        Args:
-            df (pl.DataFrame): Input DataFrame.
-            column (str): Column for which to calculate KAMA.
-            n (int): Lookback period for efficiency ratio.
-            fastest (int): Fastest SC period (e.g., 2).
-            slowest (int): Slowest SC period (e.g., 30).
-
+        Calculate Exponential Moving Average
         """
+
+        columns = self._get_column_names(columns)
+        alpha = 2 / (span + 1)
+
+        self._lf = self._lf.with_columns(
+            pl.col(col).ewm_mean(alpha=alpha, adjust=False).alias(f"{col}_ema_{span}")
+            for col in columns
+        )
+
+        return self
+
+    def rsi(self, columns: Union[List[str], pl.Expr], period: int = 14):
+        """
+        Calculate Relative Strenght Index
+        """
+        columns = self._get_column_names(columns)
+
+        self._lf = (
+            self._lf.with_columns(
+                (pl.col(col) - pl.col(col).shift(1)).alias(f"_{col}_delta")
+                for col in columns
+            )
+            .with_columns(
+                pl.when(pl.col(f"_{col}_delta") > 0)
+                .then(pl.col(f"_{col}_delta"))
+                .otherwise(0)
+                .alias(f"_{col}_gain")
+                for col in columns
+            )
+            .with_columns(
+                pl.when(pl.col(f"_{col}_delta") < 0)
+                .then(pl.col(f"_{col}_delta").abs())
+                .otherwise(0)
+                .alias(f"_{col}_loss")
+                for col in columns
+            )
+            .with_columns(
+                pl.col(f"_{col}_gain")
+                .rolling_mean(window_size=period)
+                .alias(f"_{col}_avg_gain")
+                for col in columns
+            )
+            .with_columns(
+                pl.col(f"_{col}_loss")
+                .rolling_mean(window_size=period)
+                .alias(f"_{col}_avg_loss")
+                for col in columns
+            )
+            .with_columns(
+                (
+                    100
+                    - (
+                        100
+                        / (1 + pl.col(f"_{col}_avg_gain") / pl.col(f"_{col}_avg_loss"))
+                    )
+                ).alias(f"{col}_rsi_{period}")
+                for col in columns
+            )
+            .select(
+                pl.exclude(
+                    [
+                        f"_{col}_{suffix}"
+                        for col in columns
+                        for suffix in ["delta", "gain", "loss", "avg_gain", "avg_loss"]
+                    ]
+                )
+            )
+        )
+
+        return self
