@@ -11,12 +11,12 @@ class Indicators:
     Calculate Indicators
     """
 
-    def __init__(self, df: pl.DataFrame) -> None:
+    def __init__(self, df: pl.LazyFrame) -> None:
         """
         Initialize the class
         """
 
-        self._lf = df.lazy()
+        self._lf: pl.LazyFrame = df
         self._symbol_flag = False
 
         if "symbol" not in self._lf.collect_schema().names():
@@ -37,6 +37,9 @@ class Indicators:
         Show optimized query graph
         """
         return self._lf.show_graph(optimized=optimized)
+
+    def get_lazyframe(self) -> pl.LazyFrame:
+        return self._lf
 
     def _get_column_names(self, columns: pl.Expr):
         if is_selector(columns):
@@ -146,6 +149,7 @@ class Indicators:
         self._lf = self._lf.with_columns(
             pl.col(col)
             .ewm_mean(alpha=alpha, adjust=False)
+            .over("symbol")
             .alias(_suffix + f"{col}_ema_{span}")
             for col in columns
         )
@@ -156,7 +160,7 @@ class Indicators:
         self, columns: Union[List[str], pl.Expr], period: int = 14, _suffix: str = ""
     ):
         """
-        Calculate Relative Strenght Index
+        Calculate Relative Strength Index
         """
         columns = self._get_column_names(columns)
 
@@ -242,7 +246,7 @@ class Indicators:
                 (
                     pl.col(f"_{col}_sma_{window_size}")
                     + num_std_dev * pl.col(f"_{col}_std_{window_size}")
-                ).alias(_suffix + f"{col}_upper_band_{window_size}_{num_std_dev}")
+                ).alias(_suffix + f"{col}_upprsier_band_{window_size}_{num_std_dev}")
                 for col in columns
             )
             .with_columns(
@@ -357,5 +361,135 @@ class Indicators:
             )
             .select(pl.exclude(["_numerator", "_denominator"]))
         )
+
+        return self
+
+    def _helper_pvo_ppo(
+        self,
+        col: Literal["close", "volume"],
+        short_window: int,
+        long_window: int,
+        signal_window: int,
+    ):
+        self._lf = self.ema(columns=[col], span=short_window, _suffix="_")._lf
+        self._lf = self.ema(columns=[col], span=long_window, _suffix="_")._lf
+
+        _output_col = "ppo" if col == "close" else "pvo"
+
+        self._lf = self._lf.with_columns(
+            (
+                (
+                    (
+                        pl.col(f"_{col}_ema_{short_window}")
+                        - pl.col(f"_{col}_ema_{long_window}")
+                    )
+                    / pl.col(f"_{col}_ema_{long_window}")
+                )
+                * 100
+            ).alias(f"""{_output_col}_{short_window}_{long_window}""")
+        )
+
+        self._lf = (
+            self.ema(
+                columns=[f"""{_output_col}_{short_window}_{long_window}"""],
+                span=signal_window,
+                _suffix="_",
+            )
+            ._lf.rename(
+                {
+                    f"""_{_output_col}_{short_window}_{long_window}_ema_{signal_window}""": f"""{_output_col}_signal_{short_window}_{long_window}"""
+                }
+            )
+            .with_columns(
+                (
+                    pl.col(f"""{_output_col}_{short_window}_{long_window}""")
+                    - pl.col(f"""{_output_col}_signal_{short_window}_{long_window}""")
+                ).alias(f"""{_output_col}_histogram_{short_window}_{long_window}""")
+            )
+            .select(
+                pl.exclude(
+                    [
+                        f"""_{col}_ema_{window}"""
+                        for window in [short_window, long_window]
+                    ]
+                )
+            )
+        )
+
+        return self
+
+    def ppo(
+        self, short_window: int = 12, long_window: int = 26, signal_window: int = 9
+    ):
+        """
+        Calculates the Percentage Price Oscillator
+        """
+        return self._helper_pvo_ppo(
+            col="close",
+            short_window=short_window,
+            long_window=long_window,
+            signal_window=signal_window,
+        )
+
+    def pvo(
+        self, short_window: int = 12, long_window: int = 26, signal_window: int = 9
+    ):
+        return self._helper_pvo_ppo(
+            col="volume",
+            short_window=short_window,
+            long_window=long_window,
+            signal_window=signal_window,
+        )
+
+    def roc(self, columns: Union[List[str], pl.Expr], period: int = 10):
+        """
+        Calculates Rate of Change
+        """
+
+        self._lf = self._lf.with_columns(
+            (
+                (pl.col(col) - pl.col(col).shift(n=period))
+                / pl.col(col).shift(n=period)
+                * 100
+            ).alias(f"{col}_roc_{period}")
+            for col in columns
+        )
+
+        return self
+
+    def stochastic_rsi(
+        self,
+        columns: Union[List[str], pl.Expr],
+        rsi_period: int = 14,
+        stoch_period: int = 14,
+    ):
+        """
+        Stochastic RSI
+        """
+        columns = self._get_column_names(columns)
+
+        self._lf = self.rsi(columns=columns, period=rsi_period, _suffix="_")._lf
+
+        self._lf = self._lf.with_columns(
+            (
+                (
+                    pl.col(f"_{col}_rsi_{rsi_period}")
+                    - pl.col(f"_{col}_rsi_{rsi_period}").rolling_min(
+                        window_size=stoch_period
+                    )
+                )
+                / (
+                    pl.col(f"_{col}_rsi_{rsi_period}").rolling_max(
+                        window_size=stoch_period
+                    )
+                    - (
+                        pl.col(f"_{col}_rsi_{rsi_period}").rolling_max(
+                            window_size=stoch_period
+                        )
+                    )
+                )
+            ).alias(f"{col}_stoch_rsi_{rsi_period}_{stoch_period}")
+            for col in columns
+        ).select(pl.exclude([f"_{col}_rsi_{rsi_period}" for col in columns]))
 
         return self
