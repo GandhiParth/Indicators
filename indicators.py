@@ -8,12 +8,15 @@ from utils import validate_columns
 
 class Indicators:
     """
-    Calculate Indicators
+    A utility class to calculate financial indicators on a Polars LazyFrame.
     """
 
     def __init__(self, df: pl.LazyFrame) -> None:
         """
-        Initialize the class
+         Initialize the Indicators class with a Polars LazyFrame.
+
+        Args:
+            df (pl.LazyFrame): The input LazyFrame containing financial data.
         """
 
         self._lf: pl.LazyFrame = df
@@ -26,7 +29,10 @@ class Indicators:
 
     def collect(self) -> pl.DataFrame:
         """
-        Collect the results of the DataFrame
+        Collect the results of the LazyFrame into a Polars DataFrame.
+
+        Returns:
+            pl.DataFrame: The collected DataFrame after all transformations.
         """
         if self._symbol_flag:
             self._lf = self._lf.select(pl.exclude("symbol"))
@@ -34,18 +40,37 @@ class Indicators:
 
     def show_graph(self, optimized: bool = True):
         """
-        Show optimized query graph
+        Display the query graph for the LazyFrame operations.
+
+        Args:
+            optimized (bool): Whether to display the optimized query graph. Defaults to True.
+
+        Returns:
+            str: A graphical representation of the query plan.
         """
         return self._lf.show_graph(optimized=optimized)
 
     def get_lazyframe(self) -> pl.LazyFrame:
+        """
+        Retrieve the current state of the LazyFrame.
+
+        Returns:
+            pl.LazyFrame: The LazyFrame with all transformations applied so far.
+        """
         return self._lf
 
     def _get_column_names(self, columns: pl.Expr):
-        if is_selector(columns):
-            return self._lf.select(columns).collect_schema().names()
-        else:
-            return columns
+        """
+        Resolve column names from a Polars expression or list of column names.
+
+        Args:
+            columns (pl.Expr): The column expression or list of column names.
+
+        Returns:
+            List[str]: A list of resolved column names.
+        """
+
+        return self._lf.select(columns).collect_schema().names()
 
     def sma(
         self, columns: Union[List[str], pl.Expr], window_size: int, _suffix: str = ""
