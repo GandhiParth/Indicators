@@ -48,6 +48,9 @@ class Indicators:
         Returns:
             str: A graphical representation of the query plan.
         """
+        if self._symbol_flag:
+            self._lf = self._lf.select(pl.exclude("symbol"))
+
         return self._lf.show_graph(optimized=optimized)
 
     def get_lazyframe(self) -> pl.LazyFrame:
@@ -518,3 +521,263 @@ class Indicators:
         ).select(pl.exclude([f"_{col}_rsi_{rsi_period}" for col in columns]))
 
         return self
+
+    def daily_return(
+        self, columns: Union[List[str], pl.Expr], _suffix=""
+    ) -> "Indicators":
+        """
+        Calculate the daily return based on the price column.
+        """
+
+        columns = self._get_column_names(columns)
+
+        self._lf = self._lf.with_columns(
+            ((pl.col(col) - pl.col(col).shift(1)) / pl.col(col).shift(1) * 100)
+            .over("symbol")
+            .alias(_suffix + f"{col}_daily_return")
+            for col in columns
+        )
+
+        return self
+
+    def daily_log_return(self, columns: Union[List[str], pl.Expr]) -> "Indicators":
+        """
+        Calculate Daily Log Return based on price columns.
+        """
+
+        columns = self._get_column_names(columns)
+
+        self._lf = self._lf.with_columns(
+            (pl.col(col) / pl.col(col).shift(1))
+            .log()
+            .over("symbol")
+            .alias(f"{col}_daily_log_return")
+            for col in columns
+        )
+
+        return self
+
+    def cumulative_returns(self, columns: Union[List[str], pl.Expr]) -> "Indicators":
+        """
+        Calculates the Cumulative Returns
+        """
+
+        columns = self._get_column_names(columns)
+
+        self._lf = self.daily_return(columns=columns, _suffix="_")._lf
+        self._lf = self._lf.with_columns(
+            (pl.col(f"_{col}_daily_return") + 1)
+            .cum_prod()
+            .over("symbol")
+            .alias(f"{col}_cumulative_return")
+            for col in columns
+        ).select(pl.exclude([f"_{col}_daily_return" for col in columns]))
+
+        return self
+
+    # def weighted_moving_average(
+    #     self, columns: Union[List[str], pl.Expr], window_size: int
+    # ):
+    #     """
+    #     Calculate the Weighted Moving Average (WMA) for a given column.
+    #     """
+
+    #     columns = self._get_column_names(columns)
+
+    #     weights = pl.Series("weights", [i for i in range(1, window_size + 1)])
+
+    #     self_lf = self._lf.with_columns(
+    #         (
+    #             pl.col(col).rolling_apply(
+    #                 lambda values: (values * weights).sum() / weights.sum(),
+    #                 window_size=window_size,
+    #                 min_periods=window_size,
+    #             )
+    #         )
+    #         .over("symbol")
+    #         .alias(f"{col}_wma_{window_size}")
+    #         for col in columns
+    #     )
+
+    def adx(self, period: int = 14):
+        """
+        Calculates Average Direction Index
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                pl.max_horizontal(
+                    pl.col("high") - pl.col("close"),
+                    (pl.col("high") - pl.col("close").shift(1)).abs(),
+                    (pl.col("low") - pl.col("close").shift(1)).abs(),
+                ).alias("_tr"),
+                (pl.col("high") - pl.col("high").shift(1)).alias("_high"),
+                (pl.col("low").shift(1) - pl.col("low")).alias("_low"),
+            )
+            .with_columns(
+                pl.when(pl.col("_high") > 0)
+                .then(pl.col("_high"))
+                .otherwise(0)
+                .alias("_+dm"),
+                pl.when(pl.col("_low") > 0)
+                .then(pl.col("_low"))
+                .otherwise(0)
+                .alias("_-dm"),
+            )
+            .with_columns(
+                pl.col("_tr").rolling_mean(window_size=period).alias("_smooth_tr"),
+                pl.col("_+dm").rolling_mean(window_size=period).alias("_smooth_+dm"),
+                pl.col("_-dm").rolling_mean(window_size=period).alias("_smooth_-dm"),
+            )
+            .with_columns(
+                (pl.col("_smooth_+dm") / pl.col("_smooth_tr") * 100).alias("_+di"),
+                (pl.col("_smooth_-dm") / pl.col("_smooth_tr") * 100).alias("_-di"),
+            )
+            .with_columns(
+                (
+                    (pl.col("_+di") - pl.col("_-di")).abs()
+                    / (pl.col("_+di") + pl.col("_-di"))
+                    * 100
+                ).alias("_dx")
+            )
+            .with_columns(pl.col("_dx").rolling_mean(window_size=period).alias("adx"))
+            .select(
+                pl.exclude(
+                    [
+                        "_dx",
+                        "_+di",
+                        "_-di",
+                        "_smooth_-dm",
+                        "_smooth_+dm",
+                        "_smooth_tr",
+                        "_-dm",
+                        "_+dm",
+                        "_high",
+                        "_low",
+                        "_tr",
+                    ]
+                )
+            )
+        )
+
+        return self
+
+    def aroon(self, period: int = 14):
+        """
+        Calculate the Aroon Up and Aroon Down Indicators
+        """
+
+        raise NotImplementedError
+
+    def cci(self, period: int = 14):
+        """
+        Calculates the Comodity Channel Index
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                ((pl.col("high") + pl.col("low") + pl.col("close")) / 3).alias(
+                    "_typical_price"
+                )
+            )
+            .with_columns(
+                pl.col("_typical_price")
+                .rolling_mean(window_size=period)
+                .alias("_sma_tp")
+            )
+            .with_columns(
+                (pl.col("_typical_price") - pl.col("_sma_tp"))
+                .abs()
+                .rolling_mean(window_size=period)
+                .alias("_mean_deviation")
+            )
+            .with_columns(
+                (
+                    (pl.col("_typical_price") - pl.col("_sma_tp"))
+                    / (0.015 * pl.col("_mean_deviation"))
+                ).alias("CCI")
+            )
+            .select(pl.exclude(["_mean_deviation", "_sma_tp", "_typical_price"]))
+        )
+
+        return self
+
+    def vwap(
+        self,
+    ) -> "Indicators":
+        """
+        Calculates Volume Weighted Average Price
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                ((pl.col("high") + pl.col("low") + pl.col("close")) / 3).alias(
+                    "_typical_price"
+                )
+            )
+            .with_columns(
+                (pl.col("_typical_price") * pl.col("volume")).alias("_tp_vol")
+            )
+            .with_columns(
+                pl.col("_tp_vol").cum_sum().alias("_cumsum_tp_vol"),
+                pl.col("volume").cum_sum().alias("_cumsum_vol"),
+            )
+            .with_columns(
+                (pl.col("_cumsum_tp_vol") / pl.col("_cumsum_vol")).alias("vwap")
+            )
+            .select(
+                pl.exclude(
+                    ["_typical_price", "_tp_vol", "_cumsum_tp_vol", "_cumsum_vol"]
+                )
+            )
+        )
+
+        return self
+
+    def vpt(self) -> "Indicators":
+        """
+        Calculates Volume Price Trend
+        """
+
+        self._lf = (
+            self._lf.with_columns(pl.col("close").pct_change(n=1).alias("_pct_change"))
+            .with_columns(
+                (pl.col("_pct_change") * pl.col("volume")).alias("_vpt_change")
+            )
+            .with_columns(pl.col("_vpt_change").cum_sum().alias("vpt"))
+            .select(pl.exclude(["_pct_change", "_vpt_change"]))
+        )
+
+        return self
+
+    def obv(self):
+        """
+        Calculates OnBalance Volume
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                pl.when(pl.col("close").diff() > 0)
+                .then(1)
+                .otherwise(pl.when(pl.col("close").diff() < 0).then(-1).otherwise(0))
+                .alias("_direction")
+            )
+            .with_columns(
+                (pl.col("_direction") * pl.col("volume")).alias("_obv_change")
+            )
+            .with_columns(pl.col("_obv_change").cum_sum().alias("obv"))
+            .select(pl.exclude(["_direction", "_obv_change"]))
+        )
+
+        return self
+
+    def nvi(self) -> "Indicators":
+        """
+        calculates Negative Volume Index
+        """
+
+        self._lf = self._lf.with_columns(
+            pl.col("close").pct_change().alias("_pct_change")
+        )
+
+        raise NotImplementedError
