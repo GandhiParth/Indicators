@@ -781,3 +781,127 @@ class Indicators:
         )
 
         raise NotImplementedError
+
+    def ichimoku(
+        self, window_one: int = 9, window_two: int = 26, window_three: int = 52
+    ):
+        """
+        Calculate Ichimoku Cloud Components
+        """
+
+        self._lf = self._lf.with_columns(
+            (
+                (
+                    pl.col("high").rolling_max(window_size=window_one)
+                    + pl.col("low").rolling_min(window_size=window_one)
+                )
+                / 2
+            ).alias("tenkan_sen"),
+            (
+                (
+                    pl.col("high").rolling_max(window_size=window_two)
+                    + pl.col("low").rolling_min(window_size=window_two)
+                )
+                / 2
+            ).alias("kijun_sen"),
+            (
+                (
+                    pl.col("high").rolling_max(window_size=window_three)
+                    + pl.col("low").rolling_min(window_size=window_three)
+                )
+                / 2
+            )
+            .shift(26)
+            .alias("senkou_span_b"),
+            pl.col("close").shift(-1 * window_two).alias("chikou_span"),
+        ).with_columns(
+            ((pl.col("tenkan_sen") + pl.col("kijun_sen")) / 2)
+            .shift(window_two)
+            .alias("senkou_span_a")
+        )
+
+        return self
+
+    def vortex(self, period: int = 14) -> "Indicators":
+        """
+        Calculates Vortex Indicator
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                pl.max_horizontal(
+                    (pl.col("high") - pl.col("low")),
+                    (pl.col("high") - pl.col("close").shift(1)).abs(),
+                    (pl.col("low") - pl.col("close").shift(1)).abs(),
+                ).alias("_tr"),
+                (pl.col("high") - pl.col("low").shift(1)).abs().alias("_VM+"),
+                (pl.col("low") - pl.col("high").shift(1)).abs().alias("_VM-"),
+            )
+            .with_columns(
+                pl.col("_tr").rolling_sum(window_size=period).alias("_tr_sum"),
+                pl.col("_VM+").rolling_sum(window_size=period).alias("_VM+_sum"),
+                pl.col("_VM-").rolling_sum(window_size=period).alias("_VM-_sum"),
+            )
+            .with_columns(
+                (pl.col("_VM+_sum") / pl.col("_tr_sum")).alias("+VI"),
+                (pl.col("_VM-_sum") / pl.col("_tr_sum")).alias("-VI"),
+            )
+            .select(
+                pl.exclude(["_tr", "_VM+", "_VM-", "_tr_sum", "_VM+_sum", "_VM-_sum"])
+            )
+        )
+
+        return self
+
+    def trix(self, period: int = 15):
+        """
+        Calculates the TRIX indicator
+        """
+
+        self._lf = self.ema(columns=["close"], span=period, _suffix="_")._lf.rename(
+            {f"_close_ema_{period}": "_ema1"}
+        )
+        self._lf = self.ema(columns=["_ema1"], span=period, _suffix="_")._lf.rename(
+            {f"__ema1_ema_{period}": "_ema2"}
+        )
+        self._lf = self.ema(columns=["_ema2"], span=period, _suffix="_")._lf.rename(
+            {f"__ema2_ema_{period}": "_ema3"}
+        )
+
+        self._lf = self._lf.with_columns(
+            pl.col("_ema3").pct_change(n=1).alias(f"trix_{period}")
+        ).select(pl.exclude(["_ema1", "_ema2", "_ema3"]))
+
+        return self
+
+    def mass_index(self, ema_period: int = 9, mi_period: int = 26) -> "Indicators":
+        """
+        Calculate the Mass Index Indicator
+        """
+
+        self._lf = (
+            self._lf.with_columns(
+                (pl.col("high") - pl.col("low"))
+                .ewm_mean(span=ema_period)
+                .alias("_ema1")
+            )
+            .with_columns(pl.col("_ema1").ewm_mean(span=ema_period).alias("_ema2"))
+            .with_columns((pl.col("_ema1") / pl.col("_ema2")).alias("_ema_ratio"))
+            .with_columns(
+                pl.col("_ema_ratio")
+                .rolling_sum(window_size=mi_period)
+                .alias(f"mass_index_{ema_period}_{mi_period}")
+            )
+            .select(pl.exclude(["_ema1", "_ema2", "_ema_ratio"]))
+        )
+
+        return self
+
+    def psar(
+        self, af_start: float = 0.02, af_increment: float = 0.02, af_max: float = 0.02
+    ) -> "Indicators":
+        """
+        Calculates Parabolic Stop and Reverse
+        """
+
+        raise NotImplementedError
