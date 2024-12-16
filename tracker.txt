@@ -1,4 +1,0 @@
-Momentum: KAMA, TSI, Ultimate oscillator, Williams RI,
-Volume: AccDistIndex, Chaikin Money Flow, Ease of Movement, Force Index Indicator, MFT, Negative Volume,
-Volatiltiy: DonchianChannel, KeltnerChannel, UlcerIndex, 
-Trend: Aroon, DPO, KST oscillator, MassIndex, PSAR, STC, WMA,
